@@ -7,7 +7,14 @@ use std::error::Error;
 use std::time::Instant;
 use tracing::{debug, info, span, Level};
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+#[allow(non_camel_case_types)]
+#[allow(non_upper_case_globals)]
+#[allow(non_snake_case)]
+mod bindings {
+    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+}
+
+pub use bindings::*;
 
 pub const CHUNK_SIZE_U16: usize = 1024 * 1024 / 2; // 1MB = 512K u16s
 pub const NUM_CHUNKS: usize = 1000;
