@@ -42,10 +42,18 @@ pub fn generate_sample_data() -> Vec<u16> {
         .collect()
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct BufferHeader {
+    pub compressed_data_size: usize,
+    pub chunk_count: usize,
+    pub chunk_offsets_offset: usize,  // Offset to chunk_offsets array
+    pub chunk_sizes_offset: usize,    // Offset to chunk_sizes array
+}
+
 pub struct CompressedData {
-    pub buffer: PinnedHostSlice<u8>,
-    pub chunk_offsets: PinnedHostSlice<usize>,
-    pub chunk_sizes: PinnedHostSlice<usize>,
+    pub buffer: PinnedHostSlice<u8>,  // Single unified buffer containing everything
+    pub header: BufferHeader,
 }
 
 pub fn create_test_data<C: Compressor>(
@@ -80,10 +88,26 @@ pub fn create_test_data<C: Compressor>(
         total_size += compressed.len();
     }
 
-    // Allocate separate pinned buffers for compressed data and metadata
-    let mut pinned_buffer: PinnedHostSlice<u8> = unsafe { device.alloc_pinned(total_size)? };
-    let mut pinned_offsets: PinnedHostSlice<usize> = unsafe { device.alloc_pinned(NUM_CHUNKS)? };
-    let mut pinned_sizes: PinnedHostSlice<usize> = unsafe { device.alloc_pinned(NUM_CHUNKS)? };
+    // Calculate unified buffer layout with proper alignment:
+    // [compressed_data] [padding] [chunk_offsets: usize * NUM_CHUNKS] [chunk_sizes: usize * NUM_CHUNKS] [header: BufferHeader]
+    let chunk_offsets_size = NUM_CHUNKS * std::mem::size_of::<usize>();
+    let chunk_sizes_size = NUM_CHUNKS * std::mem::size_of::<usize>();
+    let header_size = std::mem::size_of::<BufferHeader>();
+    
+    // Align to 8-byte boundaries for LZ4 compatibility
+    let align_to_8 = |size: usize| (size + 7) & !7;
+    
+    let aligned_compressed_size = align_to_8(total_size);
+    let chunk_offsets_offset = aligned_compressed_size;
+    let chunk_sizes_offset = align_to_8(chunk_offsets_offset + chunk_offsets_size);
+    let header_offset = align_to_8(chunk_sizes_offset + chunk_sizes_size);
+    let total_buffer_size = header_offset + header_size;
+    
+    // Calculate offsets within the unified buffer
+    let _compressed_data_offset = 0;
+    
+    // Allocate single unified pinned buffer
+    let mut pinned_buffer: PinnedHostSlice<u8> = unsafe { device.alloc_pinned(total_buffer_size)? };
 
     // Second pass: compress directly into pinned memory
     let mut offset = 0;
@@ -117,17 +141,64 @@ pub fn create_test_data<C: Compressor>(
         );
     }
 
-    // Copy metadata to pinned buffers
-    let offsets_slice = pinned_offsets.as_mut_slice()?;
-    let sizes_slice = pinned_sizes.as_mut_slice()?;
+    // Pack metadata arrays into the unified buffer with proper alignment
+    let slice = pinned_buffer.as_mut_slice()?;
     
-    offsets_slice.copy_from_slice(&chunk_offsets);
-    sizes_slice.copy_from_slice(&chunk_sizes);
+    // Zero out padding areas for clean alignment
+    if chunk_offsets_offset > total_size {
+        slice[total_size..chunk_offsets_offset].fill(0);
+    }
+    
+    let chunk_offsets_bytes = unsafe {
+        std::slice::from_raw_parts(
+            chunk_offsets.as_ptr() as *const u8,
+            chunk_offsets_size
+        )
+    };
+    slice[chunk_offsets_offset..chunk_offsets_offset + chunk_offsets_size]
+        .copy_from_slice(chunk_offsets_bytes);
+    
+    // Zero padding between chunk_offsets and chunk_sizes if needed
+    let chunk_offsets_end = chunk_offsets_offset + chunk_offsets_size;
+    if chunk_sizes_offset > chunk_offsets_end {
+        slice[chunk_offsets_end..chunk_sizes_offset].fill(0);
+    }
+    
+    let chunk_sizes_bytes = unsafe {
+        std::slice::from_raw_parts(
+            chunk_sizes.as_ptr() as *const u8,
+            chunk_sizes_size
+        )
+    };
+    slice[chunk_sizes_offset..chunk_sizes_offset + chunk_sizes_size]
+        .copy_from_slice(chunk_sizes_bytes);
+    
+    // Zero padding between chunk_sizes and header if needed
+    let chunk_sizes_end = chunk_sizes_offset + chunk_sizes_size;
+    if header_offset > chunk_sizes_end {
+        slice[chunk_sizes_end..header_offset].fill(0);
+    }
+    
+    // Pack header into the unified buffer
+    let header = BufferHeader {
+        compressed_data_size: aligned_compressed_size,  // Use aligned size for pointer calculations
+        chunk_count: NUM_CHUNKS,
+        chunk_offsets_offset,
+        chunk_sizes_offset,
+    };
+    
+    let header_bytes = unsafe {
+        std::slice::from_raw_parts(
+            &header as *const BufferHeader as *const u8,
+            header_size
+        )
+    };
+    slice[header_offset..header_offset + header_size]
+        .copy_from_slice(header_bytes);
     
     let compressed_data = CompressedData {
         buffer: pinned_buffer,
-        chunk_offsets: pinned_offsets,
-        chunk_sizes: pinned_sizes,
+        header,
     };
 
     Ok((compressed_data, original_chunks))
@@ -182,27 +253,56 @@ fn decompress_on_gpu<C: Compressor>(
     let end_event = device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
 
     info!(
-        "Starting GPU decompression of {} chunks",
-        compressed_data.chunk_sizes.len()
+        "Starting GPU decompression of {} chunks (single unified buffer)",
+        compressed_data.header.chunk_count
     );
+    info!("Unified buffer size: {} bytes", compressed_data.buffer.len());
+    info!("Compressed data size: {} bytes", compressed_data.header.compressed_data_size);
+    info!("Chunk offsets at offset: {}", compressed_data.header.chunk_offsets_offset);
+    info!("Chunk sizes at offset: {}", compressed_data.header.chunk_sizes_offset);
     let start = Instant::now();
 
     // Record start event
     start_event.record(&stream)?;
     copy_start_event.record(&stream)?;
 
-    // Allocate single contiguous GPU buffer for all compressed data
-    let gpu_compressed_buffer: CudaSlice<u8> = stream.memcpy_stod(&compressed_data.buffer)?;
-    let base_ptr = gpu_compressed_buffer.device_ptr(&stream).0;
-
-    // Create pointer array pointing into the contiguous buffer
+    // Transfer the ENTIRE unified buffer to GPU in ONE memcpy operation!
+    let gpu_unified_buffer: CudaSlice<u8> = stream.memcpy_stod(&compressed_data.buffer)?;
+    let gpu_base_ptr = gpu_unified_buffer.device_ptr(&stream).0;
+    
+    // Parse the unified buffer - extract metadata from GPU memory
+    let compressed_data_gpu_ptr = gpu_base_ptr;
+    let _chunk_offsets_gpu_ptr = gpu_base_ptr + compressed_data.header.chunk_offsets_offset as u64;
+    let chunk_sizes_gpu_ptr = gpu_base_ptr + compressed_data.header.chunk_sizes_offset as u64;
+    
+    // We need the metadata to create pointer arrays - extract from the host buffer
+    let buffer_slice = compressed_data.buffer.as_slice()?;
+    let offsets_bytes = &buffer_slice[compressed_data.header.chunk_offsets_offset
+        ..compressed_data.header.chunk_offsets_offset + (compressed_data.header.chunk_count * std::mem::size_of::<usize>())];
+    let sizes_bytes = &buffer_slice[compressed_data.header.chunk_sizes_offset
+        ..compressed_data.header.chunk_sizes_offset + (compressed_data.header.chunk_count * std::mem::size_of::<usize>())];
+    
+    // Convert byte slices back to usize arrays
+    let temp_offsets_buffer: &[usize] = unsafe {
+        std::slice::from_raw_parts(
+            offsets_bytes.as_ptr() as *const usize,
+            compressed_data.header.chunk_count
+        )
+    };
+    let temp_sizes_buffer: &[usize] = unsafe {
+        std::slice::from_raw_parts(
+            sizes_bytes.as_ptr() as *const usize,
+            compressed_data.header.chunk_count
+        )
+    };
+    
+    // Create pointer array pointing into the compressed data section
     let mut gpu_compressed_ptrs: Vec<CUdeviceptr> = Vec::new();
-    let offsets_slice = compressed_data.chunk_offsets.as_slice()?;
-    for &offset in offsets_slice {
-        gpu_compressed_ptrs.push(base_ptr + offset as u64);
+    for &offset in temp_offsets_buffer {
+        gpu_compressed_ptrs.push(compressed_data_gpu_ptr + offset as u64);
     }
-
-    let compressed_sizes = compressed_data.chunk_sizes.as_slice()?;
+    
+    let compressed_sizes = temp_sizes_buffer;
 
     // Allocate GPU buffers for decompressed chunks
     let mut gpu_decompressed_chunks: Vec<CudaSlice<u8>> = Vec::new();
@@ -216,8 +316,8 @@ fn decompress_on_gpu<C: Compressor>(
         gpu_decompressed_chunks.push(gpu_chunk);
     }
 
-    // Copy sizes to GPU
-    let gpu_compressed_sizes: CudaSlice<usize> = stream.memcpy_stod(compressed_sizes)?;
+    // Sizes are already on GPU as part of the unified buffer!
+    let gpu_compressed_sizes_ptr = chunk_sizes_gpu_ptr;
     let gpu_decompressed_buffer_sizes: CudaSlice<usize> =
         stream.memcpy_stod(&vec![chunk_size_bytes; NUM_CHUNKS])?;
     let gpu_actual_decompressed_sizes: CudaSlice<usize> = stream.alloc_zeros(NUM_CHUNKS)?;
@@ -272,7 +372,7 @@ fn decompress_on_gpu<C: Compressor>(
         // Call algorithm-specific decompression
         compressor.decompress_on_gpu(
             gpu_compressed_ptr_array.device_ptr(&stream).0,
-            gpu_compressed_sizes.device_ptr(&stream).0,
+            gpu_compressed_sizes_ptr as CUdeviceptr,
             gpu_decompressed_buffer_sizes.device_ptr(&stream).0,
             gpu_actual_decompressed_sizes.device_ptr(&stream).0,
             gpu_decompressed_ptr_array.device_ptr(&stream).0,

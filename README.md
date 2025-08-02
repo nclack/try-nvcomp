@@ -33,15 +33,16 @@ cargo run --release --bin lz4_test
 Both tests:
 1. Generate 1000 chunks of 1MB test data (u16 arrays) with different patterns
 2. Compress the data on CPU using the respective algorithm (Zstd or LZ4)
-3. Transfer compressed data to GPU memory
-4. Decompress all chunks in parallel on GPU using nvCOMP batched operations
-5. Verify decompressed data matches original
-6. Report GPU throughput in GB/s
+3. Pack compressed data, metadata, and headers into a single pinned memory buffer, aligning to 8-bytes
+4. Transfer the entire unified buffer to GPU memory in one operation
+5. Decompress all chunks in parallel on GPU using nvCOMP batched operations
+6. Verify decompressed data matches original
+7. Report GPU copy and decompression throughput in GB/s
 
-The benchmarks measures just the pure GPU decompression performance for a single
-batch decompression call.
-
-It uses CUDA events timestamps for precise timing of the decompression step.
+The benchmarks measure both memory transfer and GPU decompression performance
+using CUDA events for precise timing. The unified buffer approach minimizes
+GPU memory transfers by consolidating all data into a single pinned memory
+allocation transferred via one memcpy operation.
 
 Patterns:
 - Uniformly distributed random over 10 bits.
@@ -59,12 +60,17 @@ Hardware configuration:
 - **CUDA**: 12.9
 - **nvCOMP**: v4.2
 
-Maximum GPU Throughput (3 runs each):
-- Zstd decompression: **7.53 GB/s** (runs: 7.23, 7.36, 7.53 GB/s)
-- LZ4 decompression: **7.41 GB/s** (runs: 7.41, 7.27, 7.09 GB/s)
+### Unified Buffer Performance (3 runs each):
+
+**Copy to GPU (Pinned Memory):**
+- Zstd: **11.78 GB/s** (runs: 10.50, 11.71, 11.78 GB/s)
+- LZ4: **18.54 GB/s** (runs: 18.39, 18.54, 18.00 GB/s)
+
+**GPU Decompression:**
+- Zstd: **49.15 GB/s** (runs: 47.86, 45.52, 49.15 GB/s)
+- LZ4: **93.65 GB/s** (runs: 93.47, 93.39, 93.65 GB/s)
 
 _Note_: Running in WSL effects throughput by 20-30%.
         This could be differences in the cuda version (12.6 vs 12.9), drivers
-        (575.57 vs 576.57), or due to virtualization. Max Zstd 6.37 GB/s, lz4
-        7.66 GB/s.
+        (575.57 vs 576.57), or due to virtualization.
 
