@@ -4,9 +4,9 @@ GPU decompression benchmarks using NVIDIA nvCOMP library for Zstd and LZ4 compre
 
 ## Prerequisites
 
-- **CUDA Runtime Library**: This project requires CUDA 12.9+ to be installed
-- **nvCOMP Library**: NVIDIA nvCOMP v4.2+ must be installed
-- **Windows**: Currently only builds on Windows. For Linux or non-standard installation paths, modify `build.rs`
+- **CUDA Runtime Library**: CUDA 12.6+ 
+- **nvCOMP Library**: NVIDIA nvCOMP v4.2+ 
+- **Windows or Linux**: For non-standard installation paths, modify `build.rs`.
 
 ## Build
 
