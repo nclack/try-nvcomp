@@ -24,3 +24,7 @@ bytesize = "1.3"
 bindgen = "0.70"
 cc = "1.0"
 pkg-config = "0.3"
+
+[profile.release]
+  lto = true
+  panic = "abort"

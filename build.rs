@@ -30,17 +30,9 @@ fn configure_windows() {
 }
 
 fn configure_linux() {
-    // Try to use pkg-config for CUDA libraries
-    match pkg_config::Config::new().probe("cudart-12.6") {
-        Ok(_) => {
-            println!("cargo:rustc-link-lib=cudart");
-        }
-        Err(_) => {
-            // Fallback to manual configuration
-            println!("cargo:rustc-link-search=native=/usr/local/cuda-12.6/targets/x86_64-linux/lib");
-            println!("cargo:rustc-link-lib=cudart");
-        }
-    }
+    // Use static CUDA runtime library
+    println!("cargo:rustc-link-search=native=/usr/local/cuda-12.6/targets/x86_64-linux/lib");
+    println!("cargo:rustc-link-lib=static=cudart_static");
     
     // Link with nvCOMP libraries - these are installed in specific paths
     println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu/nvcomp/12");
