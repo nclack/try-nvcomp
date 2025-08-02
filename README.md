@@ -70,7 +70,9 @@ Hardware configuration:
 - Zstd: **49.15 GB/s** (runs: 47.86, 45.52, 49.15 GB/s)
 - LZ4: **93.65 GB/s** (runs: 93.47, 93.39, 93.65 GB/s)
 
-_Note_: Running in WSL effects throughput by 20-30%.
+_Note_: Running in WSL effects copies to the gpu by about 50%.
+        Decompression bandwidths are the same.
         This could be differences in the cuda version (12.6 vs 12.9), drivers
-        (575.57 vs 576.57), or due to virtualization.
+        (575.57 vs 576.57), but it's probably just the virtualization. It looks
+        a lot like 1 extra copy.
 
