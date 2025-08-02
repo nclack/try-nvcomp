@@ -48,6 +48,7 @@ Patterns:
 
 ## Benchmark Results
 
+Environment: Windows 11
 Hardware configuration:
 - **GPU**: NVIDIA GeForce RTX 5080 (16GB VRAM)
 - **CPU**: AMD Ryzen 5 7600X 6-Core Processor (12 threads)
@@ -59,4 +60,7 @@ Hardware configuration:
 Maximum GPU Throughput (3 runs each):
 - Zstd decompression: **8.75 GB/s** (runs: 8.17, 8.75 GB/s, 8.63 GB/s)
 - LZ4 decompression: **9.62 GB/s** (runs: 9.12, 7.76, 9.62 GB/s)
+
+_Note_: Running in WSL effects throughput by 20-30%.
+        Max Zstd 6.37 GB/s, lz4 7.66 GB/s.
 
