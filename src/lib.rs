@@ -11,7 +11,7 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 pub const CHUNK_SIZE_U16: usize = 1024 * 1024 / 2; // 1MB = 512K u16s
 pub const NUM_CHUNKS: usize = 1000;
-pub const NVCOMP_SUCCESS: i32 = 0;
+pub const NVCOMP_SUCCESS: u32 = 0;
 
 pub trait Compressor {
     fn compress_data(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>>;
@@ -144,7 +144,7 @@ fn decompress_on_gpu<C: Compressor>(
     let gpu_decompressed_buffer_sizes: CudaSlice<usize> =
         stream.memcpy_stod(&vec![chunk_size_bytes; NUM_CHUNKS])?;
     let gpu_actual_decompressed_sizes: CudaSlice<usize> = stream.alloc_zeros(NUM_CHUNKS)?;
-    let gpu_statuses: CudaSlice<i32> = stream.alloc_zeros(NUM_CHUNKS)?;
+    let gpu_statuses: CudaSlice<u32> = stream.alloc_zeros(NUM_CHUNKS)?;
 
     // Copy pointer arrays to GPU
     let gpu_compressed_ptr_array: CudaSlice<CUdeviceptr> =
@@ -223,7 +223,7 @@ fn decompress_on_gpu<C: Compressor>(
 
     // For verification, copy some results back
     info!("Copying status results from GPU...");
-    let host_statuses: Vec<i32> = stream.memcpy_dtov(&gpu_statuses)?;
+    let host_statuses: Vec<u32> = stream.memcpy_dtov(&gpu_statuses)?;
     info!("Copying size results from GPU...");
     let host_actual_sizes: Vec<usize> = stream.memcpy_dtov(&gpu_actual_decompressed_sizes)?;
     info!("Results copied successfully");
@@ -359,7 +359,7 @@ impl Compressor for ZstdCompressor {
                 }),
                 temp_bytes,
                 gpu_decompressed_ptr_array as *const *mut std::ffi::c_void,
-                gpu_statuses as *mut i32,
+                gpu_statuses as *mut u32,
                 stream,
             );
 
@@ -438,7 +438,7 @@ impl Compressor for Lz4Compressor {
                 }),
                 temp_bytes,
                 gpu_decompressed_ptr_array as *const *mut std::ffi::c_void,
-                gpu_statuses as *mut i32,
+                gpu_statuses as *mut u32,
                 stream,
             );
 

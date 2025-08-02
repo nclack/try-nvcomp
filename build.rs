@@ -2,6 +2,18 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    if cfg!(target_os = "windows") {
+        configure_windows();
+    } else if cfg!(target_os = "linux") {
+        configure_linux();
+    } else {
+        panic!("Unsupported platform");
+    }
+    
+    generate_bindings();
+}
+
+fn configure_windows() {
     // Link with CUDA 12.9 and nvCOMP v4.2 libraries
     println!("cargo:rustc-link-search=native=C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\lib\\x64");
     println!("cargo:rustc-link-search=native=C:\\Program Files\\NVIDIA nvCOMP\\v4.2\\lib\\12");
@@ -15,12 +27,36 @@ fn main() {
     println!("cargo:rustc-link-lib=kernel32");
     println!("cargo:rustc-link-lib=user32");
     println!("cargo:rustc-link-lib=advapi32");
+}
+
+fn configure_linux() {
+    // Try to use pkg-config for CUDA libraries
+    match pkg_config::Config::new().probe("cudart-12.6") {
+        Ok(_) => {
+            println!("cargo:rustc-link-lib=cudart");
+        }
+        Err(_) => {
+            // Fallback to manual configuration
+            println!("cargo:rustc-link-search=native=/usr/local/cuda-12.6/targets/x86_64-linux/lib");
+            println!("cargo:rustc-link-lib=cudart");
+        }
+    }
     
-    // Generate minimal bindings just for the types we need
-    let bindings = bindgen::Builder::default()
+    // Link with nvCOMP libraries - these are installed in specific paths
+    println!("cargo:rustc-link-search=native=/usr/lib/x86_64-linux-gnu/nvcomp/12");
+    println!("cargo:rustc-link-lib=static=nvcomp_static");
+    println!("cargo:rustc-link-lib=static=nvcomp_device_static");
+    
+    // Required system libraries on Linux
+    println!("cargo:rustc-link-lib=dl");
+    println!("cargo:rustc-link-lib=pthread");
+    println!("cargo:rustc-link-lib=rt");
+    println!("cargo:rustc-link-lib=stdc++");
+}
+
+fn generate_bindings() {
+    let mut builder = bindgen::Builder::default()
         .header("wrapper.h")
-        .clang_arg("-IC:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\include")
-        .clang_arg("-IC:\\Program Files\\NVIDIA nvCOMP\\v4.2\\include")
         .allowlist_type("nvcompStatus_t")
         .allowlist_type("cudaStream_t")
         .allowlist_function("nvcompBatchedZstdDecompressAsync")
@@ -31,7 +67,20 @@ fn main() {
         // Silence naming convention warnings
         .derive_debug(false)
         .layout_tests(false)
-        .generate_comments(false)
+        .generate_comments(false);
+
+    // Add platform-specific include paths
+    if cfg!(target_os = "windows") {
+        builder = builder
+            .clang_arg("-IC:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9\\include")
+            .clang_arg("-IC:\\Program Files\\NVIDIA nvCOMP\\v4.2\\include");
+    } else if cfg!(target_os = "linux") {
+        builder = builder
+            .clang_arg("-I/usr/local/cuda-12.6/targets/x86_64-linux/include")
+            .clang_arg("-I/usr/include/nvcomp_12");
+    }
+
+    let bindings = builder
         .generate()
         .unwrap_or_else(|_| {
             // Fallback if bindgen fails

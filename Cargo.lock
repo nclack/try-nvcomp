@@ -461,6 +461,7 @@ dependencies = [
  "cc",
  "cudarc",
  "lz4",
+ "pkg-config",
  "rand",
  "tracing",
  "tracing-subscriber",
