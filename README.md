@@ -60,8 +60,8 @@ Hardware configuration:
 - **nvCOMP**: v4.2
 
 Maximum GPU Throughput (3 runs each):
-- Zstd decompression: **8.75 GB/s** (runs: 8.17, 8.75 GB/s, 8.63 GB/s)
-- LZ4 decompression: **9.62 GB/s** (runs: 9.12, 7.76, 9.62 GB/s)
+- Zstd decompression: **7.53 GB/s** (runs: 7.23, 7.36, 7.53 GB/s)
+- LZ4 decompression: **7.41 GB/s** (runs: 7.41, 7.27, 7.09 GB/s)
 
 _Note_: Running in WSL effects throughput by 20-30%.
         This could be differences in the cuda version (12.6 vs 12.9), drivers

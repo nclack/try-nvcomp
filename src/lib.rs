@@ -122,7 +122,11 @@ fn decompress_on_gpu<C: Compressor>(
 
     // Create CUDA events for precise timing
     let start_event = device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
+    let copy_start_event = device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
+    let copy_end_event = device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
     let decomp_events = vec![
+        device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?,
+        device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?,
         device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?,
         device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?,
         device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?,
@@ -139,6 +143,7 @@ fn decompress_on_gpu<C: Compressor>(
 
     // Record start event
     start_event.record(&stream)?;
+    copy_start_event.record(&stream)?;
 
     // Allocate individual GPU buffers for each compressed chunk
     let mut gpu_compressed_chunks: Vec<CudaSlice<u8>> = Vec::new();
@@ -178,11 +183,14 @@ fn decompress_on_gpu<C: Compressor>(
     let gpu_decompressed_ptr_array: CudaSlice<CUdeviceptr> =
         stream.memcpy_stod(&gpu_decompressed_ptrs)?;
 
+    // Record end of copy operations
+    copy_end_event.record(&stream)?;
+
     // Synchronize to ensure all copies are complete before decompression
     stream.synchronize()?;
     let copy_time = start.elapsed();
     info!(
-        "Data copy to GPU: {:.4}ms",
+        "Data copy to GPU (CPU time): {:.4}ms",
         copy_time.as_secs_f64() * 1000.0
     );
 
@@ -236,17 +244,17 @@ fn decompress_on_gpu<C: Compressor>(
 
     // Get timing from CUDA events
     let total_gpu_time = start_event.elapsed_ms(&end_event)?;
+    let copy_gpu_time = copy_start_event.elapsed_ms(&copy_end_event)?;
     let decomp_gpu_time = {
         (1..decomp_events.len())
             .filter_map(|i| decomp_events[i - 1].elapsed_ms(&decomp_events[i]).ok())
             .min_by(f32::total_cmp)
             .unwrap()
     };
-    let copy_gpu_time = total_gpu_time - decomp_gpu_time;
 
     info!("Total GPU time: {:.4}ms", total_gpu_time);
-    info!("Decomp GPU time: {:.4}ms", decomp_gpu_time);
     info!("Copy GPU time: {:.4}ms", copy_gpu_time);
+    info!("Decomp GPU time: {:.4}ms", decomp_gpu_time);
 
     // For verification, copy some results back
     info!("Copying status results from GPU...");
@@ -255,19 +263,25 @@ fn decompress_on_gpu<C: Compressor>(
     let host_actual_sizes: Vec<usize> = stream.memcpy_dtov(&gpu_actual_decompressed_sizes)?;
     info!("Results copied successfully");
 
-    let total_decompressed_size = NUM_CHUNKS * chunk_size_bytes;
+    // Calculate throughputs
+    let copy_throughput_gb_s =
+        (total_compressed_size as f64 / 1e9) / (copy_gpu_time as f64 / 1000.0);
+    let decomp_throughput_gb_s =
+        (total_decompressed_size as f64 / 1e9) / (decomp_gpu_time as f64 / 1000.0);
 
     info!(
         "GPU {} decompression completed:",
         compressor.algorithm_name()
     );
-    info!("  Copy to GPU: {:.4}ms", copy_gpu_time);
-    info!("  Decompression: {:.4}ms", decomp_gpu_time);
-    info!("  Total GPU time: {:.4}ms", total_gpu_time);
     info!(
-        "  GPU throughput: {:.2} GB/s",
-        (total_decompressed_size as f64 / 1e9) / (total_gpu_time as f64 / 1000.0)
+        "  Copy to GPU: {:.4}ms ({:.2} GB/s)",
+        copy_gpu_time, copy_throughput_gb_s
     );
+    info!(
+        "  Decompression: {:.4}ms ({:.2} GB/s)",
+        decomp_gpu_time, decomp_throughput_gb_s
+    );
+    info!("  Total GPU time: {:.4}ms", total_gpu_time);
     info!("  Status check: {:?}", &host_statuses[..5]);
     info!("  Size check: {:?}", &host_actual_sizes[..5]);
 
@@ -328,11 +342,47 @@ fn decompress_on_gpu<C: Compressor>(
     Ok(())
 }
 
-pub struct ZstdCompressor;
+pub struct ZstdCompressor {
+    temp_buffer_ptr: Option<CUdeviceptr>,
+    temp_buffer_size: usize,
+}
 
 impl ZstdCompressor {
     pub fn new() -> Self {
-        Self
+        Self {
+            temp_buffer_ptr: None,
+            temp_buffer_size: 0,
+        }
+    }
+
+    pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut temp_bytes: usize = 0;
+        unsafe {
+            let status = nvcompBatchedZstdDecompressGetTempSize(
+                NUM_CHUNKS,
+                CHUNK_SIZE_U16 * 2,
+                &mut temp_bytes as *mut usize,
+            );
+
+            if status != NVCOMP_SUCCESS {
+                return Err("Failed to get temp size".into());
+            }
+        }
+
+        if temp_bytes > 0 {
+            let device = CudaContext::new(0)?;
+            let stream = device.default_stream();
+            let temp_buffer: CudaSlice<u8> = stream.alloc_zeros(temp_bytes)?;
+            self.temp_buffer_ptr = Some(temp_buffer.device_ptr(&stream).0);
+            self.temp_buffer_size = temp_bytes;
+            std::mem::forget(temp_buffer); // Prevent automatic deallocation
+            info!(
+                "nvCOMP Zstd temp memory allocated: {}",
+                ByteSize(temp_bytes.try_into().unwrap())
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -352,32 +402,6 @@ impl Compressor for ZstdCompressor {
         stream: cudaStream_t,
     ) -> Result<(), Box<dyn Error>> {
         unsafe {
-            // Get temp memory requirements
-            let mut temp_bytes: usize = 0;
-            let status = nvcompBatchedZstdDecompressGetTempSize(
-                NUM_CHUNKS,
-                CHUNK_SIZE_U16 * 2,
-                &mut temp_bytes as *mut usize,
-            );
-
-            if status != NVCOMP_SUCCESS {
-                return Err("Failed to get temp size".into());
-            }
-
-            info!(
-                "nvCOMP temp memory required: {}",
-                ByteSize(temp_bytes.try_into().unwrap())
-            );
-
-            // Allocate temp memory if needed
-            let device = CudaContext::new(0)?;
-            let stream_ref = device.default_stream();
-            let gpu_temp: Option<CudaSlice<u8>> = if temp_bytes > 0 {
-                Some(stream_ref.alloc_zeros(temp_bytes)?)
-            } else {
-                None
-            };
-
             // Perform batched decompression
             let status = nvcompBatchedZstdDecompressAsync(
                 gpu_compressed_ptr_array as *const *const std::ffi::c_void,
@@ -385,10 +409,9 @@ impl Compressor for ZstdCompressor {
                 gpu_decompressed_buffer_sizes as *const usize,
                 gpu_actual_decompressed_sizes as *mut usize,
                 NUM_CHUNKS,
-                gpu_temp.as_ref().map_or(std::ptr::null_mut(), |t| {
-                    t.device_ptr(&stream_ref).0 as *mut std::ffi::c_void
-                }),
-                temp_bytes,
+                self.temp_buffer_ptr
+                    .map_or(std::ptr::null_mut(), |ptr| ptr as *mut std::ffi::c_void),
+                self.temp_buffer_size,
                 gpu_decompressed_ptr_array as *const *mut std::ffi::c_void,
                 gpu_statuses as *mut nvcompStatus_t,
                 stream,
@@ -410,11 +433,47 @@ impl Compressor for ZstdCompressor {
     }
 }
 
-pub struct Lz4Compressor;
+pub struct Lz4Compressor {
+    temp_buffer_ptr: Option<CUdeviceptr>,
+    temp_buffer_size: usize,
+}
 
 impl Lz4Compressor {
     pub fn new() -> Self {
-        Self
+        Self {
+            temp_buffer_ptr: None,
+            temp_buffer_size: 0,
+        }
+    }
+
+    pub fn init(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut temp_bytes: usize = 0;
+        unsafe {
+            let status = nvcompBatchedLZ4DecompressGetTempSize(
+                NUM_CHUNKS,
+                CHUNK_SIZE_U16 * 2,
+                &mut temp_bytes as *mut usize,
+            );
+
+            if status != NVCOMP_SUCCESS {
+                return Err("Failed to get temp size".into());
+            }
+        }
+
+        if temp_bytes > 0 {
+            let device = CudaContext::new(0)?;
+            let stream = device.default_stream();
+            let temp_buffer: CudaSlice<u8> = stream.alloc_zeros(temp_bytes)?;
+            self.temp_buffer_ptr = Some(temp_buffer.device_ptr(&stream).0);
+            self.temp_buffer_size = temp_bytes;
+            std::mem::forget(temp_buffer); // Prevent automatic deallocation
+            info!(
+                "nvCOMP LZ4 temp memory allocated: {}",
+                ByteSize(temp_bytes.try_into().unwrap())
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -438,32 +497,6 @@ impl Compressor for Lz4Compressor {
         stream: cudaStream_t,
     ) -> Result<(), Box<dyn Error>> {
         unsafe {
-            // Get temp memory requirements
-            let mut temp_bytes: usize = 0;
-            let status = nvcompBatchedLZ4DecompressGetTempSize(
-                NUM_CHUNKS,
-                CHUNK_SIZE_U16 * 2,
-                &mut temp_bytes as *mut usize,
-            );
-
-            if status != NVCOMP_SUCCESS {
-                return Err("Failed to get temp size".into());
-            }
-
-            info!(
-                "nvCOMP temp memory required: {}",
-                ByteSize(temp_bytes.try_into().unwrap())
-            );
-
-            // Allocate temp memory if needed
-            let device = CudaContext::new(0)?;
-            let stream_ref = device.default_stream();
-            let gpu_temp: Option<CudaSlice<u8>> = if temp_bytes > 0 {
-                Some(stream_ref.alloc_zeros(temp_bytes)?)
-            } else {
-                None
-            };
-
             // Perform batched decompression
             let status = nvcompBatchedLZ4DecompressAsync(
                 gpu_compressed_ptr_array as *const *const std::ffi::c_void,
@@ -471,10 +504,9 @@ impl Compressor for Lz4Compressor {
                 gpu_decompressed_buffer_sizes as *const usize,
                 gpu_actual_decompressed_sizes as *mut usize,
                 NUM_CHUNKS,
-                gpu_temp.as_ref().map_or(std::ptr::null_mut(), |t| {
-                    t.device_ptr(&stream_ref).0 as *mut std::ffi::c_void
-                }),
-                temp_bytes,
+                self.temp_buffer_ptr
+                    .map_or(std::ptr::null_mut(), |ptr| ptr as *mut std::ffi::c_void),
+                self.temp_buffer_size,
                 gpu_decompressed_ptr_array as *const *mut std::ffi::c_void,
                 gpu_statuses as *mut nvcompStatus_t,
                 stream,
