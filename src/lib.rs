@@ -1,5 +1,5 @@
 use bytesize::ByteSize;
-use cudarc::driver::safe::{CudaContext, CudaSlice};
+use cudarc::driver::safe::{CudaContext, CudaSlice, PinnedHostSlice};
 use cudarc::driver::sys::{CUdeviceptr, CUevent_flags};
 use cudarc::driver::DevicePtr;
 use rand::Rng;
@@ -42,14 +42,17 @@ pub fn generate_sample_data() -> Vec<u16> {
         .collect()
 }
 
+pub struct CompressedData {
+    pub buffer: PinnedHostSlice<u8>,
+    pub chunk_offsets: PinnedHostSlice<usize>,
+    pub chunk_sizes: PinnedHostSlice<usize>,
+}
+
 pub fn create_test_data<C: Compressor>(
     compressor: &C,
-) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), Box<dyn Error>> {
-    info!(
-        "Generating {} chunks of {} u16 data",
-        NUM_CHUNKS,
-        ByteSize((CHUNK_SIZE_U16 * 2).try_into().unwrap())
-    );
+) -> Result<(CompressedData, Vec<Vec<u8>>), Box<dyn Error>> {
+    let device = CudaContext::new(0)?;
+    let _stream = device.default_stream();
 
     // Generate 3 different patterns
     let patterns = vec![
@@ -58,8 +61,33 @@ pub fn create_test_data<C: Compressor>(
         vec![42u16; CHUNK_SIZE_U16],
     ];
 
-    let mut compressed_chunks = Vec::new();
     let mut original_chunks = Vec::new();
+    let mut chunk_offsets = Vec::new();
+    let mut chunk_sizes = Vec::new();
+    let mut total_size = 0;
+
+    // First pass: calculate total size needed
+    for i in 0..NUM_CHUNKS {
+        let pattern = &patterns[i % patterns.len()];
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                pattern.as_ptr() as *const u8,
+                pattern.len() * std::mem::size_of::<u16>(),
+            )
+        };
+        original_chunks.push(bytes.to_vec());
+        let compressed = compressor.compress_data(bytes)?;
+        total_size += compressed.len();
+    }
+
+    // Allocate separate pinned buffers for compressed data and metadata
+    let mut pinned_buffer: PinnedHostSlice<u8> = unsafe { device.alloc_pinned(total_size)? };
+    let mut pinned_offsets: PinnedHostSlice<usize> = unsafe { device.alloc_pinned(NUM_CHUNKS)? };
+    let mut pinned_sizes: PinnedHostSlice<usize> = unsafe { device.alloc_pinned(NUM_CHUNKS)? };
+
+    // Second pass: compress directly into pinned memory
+    let mut offset = 0;
+    original_chunks.clear(); // Clear and rebuild
 
     for i in 0..NUM_CHUNKS {
         let pattern = &patterns[i % patterns.len()];
@@ -69,11 +97,17 @@ pub fn create_test_data<C: Compressor>(
                 pattern.len() * std::mem::size_of::<u16>(),
             )
         };
-
-        // Store original data for verification
         original_chunks.push(bytes.to_vec());
-
         let compressed = compressor.compress_data(bytes)?;
+
+        // Copy compressed data to pinned memory
+        let slice = pinned_buffer.as_mut_slice()?;
+        slice[offset..offset + compressed.len()].copy_from_slice(&compressed);
+
+        chunk_offsets.push(offset);
+        chunk_sizes.push(compressed.len());
+        offset += compressed.len();
+
         info!(
             "Chunk {}: compressed {} -> {} (ratio: {:.2})",
             i,
@@ -81,10 +115,22 @@ pub fn create_test_data<C: Compressor>(
             ByteSize(compressed.len().try_into().unwrap()),
             bytes.len() as f32 / compressed.len() as f32
         );
-        compressed_chunks.push(compressed);
     }
 
-    Ok((compressed_chunks, original_chunks))
+    // Copy metadata to pinned buffers
+    let offsets_slice = pinned_offsets.as_mut_slice()?;
+    let sizes_slice = pinned_sizes.as_mut_slice()?;
+    
+    offsets_slice.copy_from_slice(&chunk_offsets);
+    sizes_slice.copy_from_slice(&chunk_sizes);
+    
+    let compressed_data = CompressedData {
+        buffer: pinned_buffer,
+        chunk_offsets: pinned_offsets,
+        chunk_sizes: pinned_sizes,
+    };
+
+    Ok((compressed_data, original_chunks))
 }
 
 pub fn run_benchmark<C: Compressor>(compressor: C) -> Result<(), Box<dyn Error>> {
@@ -114,7 +160,7 @@ pub fn run_benchmark<C: Compressor>(compressor: C) -> Result<(), Box<dyn Error>>
 
 fn decompress_on_gpu<C: Compressor>(
     compressor: &C,
-    compressed_chunks: &[Vec<u8>],
+    compressed_data: &CompressedData,
     original_chunks: &[Vec<u8>],
 ) -> Result<(), Box<dyn Error>> {
     let device = CudaContext::new(0)?;
@@ -137,7 +183,7 @@ fn decompress_on_gpu<C: Compressor>(
 
     info!(
         "Starting GPU decompression of {} chunks",
-        compressed_chunks.len()
+        compressed_data.chunk_sizes.len()
     );
     let start = Instant::now();
 
@@ -145,18 +191,18 @@ fn decompress_on_gpu<C: Compressor>(
     start_event.record(&stream)?;
     copy_start_event.record(&stream)?;
 
-    // Allocate individual GPU buffers for each compressed chunk
-    let mut gpu_compressed_chunks: Vec<CudaSlice<u8>> = Vec::new();
-    let mut gpu_compressed_ptrs: Vec<CUdeviceptr> = Vec::new();
-    let mut compressed_sizes: Vec<usize> = Vec::new();
+    // Allocate single contiguous GPU buffer for all compressed data
+    let gpu_compressed_buffer: CudaSlice<u8> = stream.memcpy_stod(&compressed_data.buffer)?;
+    let base_ptr = gpu_compressed_buffer.device_ptr(&stream).0;
 
-    for chunk in compressed_chunks {
-        let gpu_chunk: CudaSlice<u8> = stream.memcpy_stod(chunk)?;
-        let ptr = gpu_chunk.device_ptr(&stream).0;
-        gpu_compressed_ptrs.push(ptr);
-        compressed_sizes.push(chunk.len());
-        gpu_compressed_chunks.push(gpu_chunk);
+    // Create pointer array pointing into the contiguous buffer
+    let mut gpu_compressed_ptrs: Vec<CUdeviceptr> = Vec::new();
+    let offsets_slice = compressed_data.chunk_offsets.as_slice()?;
+    for &offset in offsets_slice {
+        gpu_compressed_ptrs.push(base_ptr + offset as u64);
     }
+
+    let compressed_sizes = compressed_data.chunk_sizes.as_slice()?;
 
     // Allocate GPU buffers for decompressed chunks
     let mut gpu_decompressed_chunks: Vec<CudaSlice<u8>> = Vec::new();
@@ -171,7 +217,7 @@ fn decompress_on_gpu<C: Compressor>(
     }
 
     // Copy sizes to GPU
-    let gpu_compressed_sizes: CudaSlice<usize> = stream.memcpy_stod(&compressed_sizes)?;
+    let gpu_compressed_sizes: CudaSlice<usize> = stream.memcpy_stod(compressed_sizes)?;
     let gpu_decompressed_buffer_sizes: CudaSlice<usize> =
         stream.memcpy_stod(&vec![chunk_size_bytes; NUM_CHUNKS])?;
     let gpu_actual_decompressed_sizes: CudaSlice<usize> = stream.alloc_zeros(NUM_CHUNKS)?;
@@ -274,7 +320,7 @@ fn decompress_on_gpu<C: Compressor>(
         compressor.algorithm_name()
     );
     info!(
-        "  Copy to GPU: {:.4}ms ({:.2} GB/s)",
+        "  Copy to GPU (pinned): {:.4}ms ({:.2} GB/s)",
         copy_gpu_time, copy_throughput_gb_s
     );
     info!(
