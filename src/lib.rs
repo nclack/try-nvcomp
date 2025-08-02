@@ -22,7 +22,8 @@ pub const NVCOMP_SUCCESS: nvcompStatus_t = nvcompStatus_t_nvcompSuccess;
 
 pub trait Compressor {
     fn compress_data(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>>;
-    fn decompress_on_gpu(&self, 
+    fn decompress_on_gpu(
+        &self,
         gpu_compressed_ptr_array: CUdeviceptr,
         gpu_compressed_sizes: CUdeviceptr,
         gpu_decompressed_buffer_sizes: CUdeviceptr,
@@ -41,7 +42,9 @@ pub fn generate_sample_data() -> Vec<u16> {
         .collect()
 }
 
-pub fn create_test_data<C: Compressor>(compressor: &C) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), Box<dyn Error>> {
+pub fn create_test_data<C: Compressor>(
+    compressor: &C,
+) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), Box<dyn Error>> {
     info!(
         "Generating {} chunks of {} u16 data",
         NUM_CHUNKS,
@@ -87,14 +90,25 @@ pub fn create_test_data<C: Compressor>(compressor: &C) -> Result<(Vec<Vec<u8>>, 
 pub fn run_benchmark<C: Compressor>(compressor: C) -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
 
-    let _span = span!(Level::INFO, "nvcomp_benchmark", algorithm = compressor.algorithm_name()).entered();
+    let _span = span!(
+        Level::INFO,
+        "nvcomp_benchmark",
+        algorithm = compressor.algorithm_name()
+    )
+    .entered();
 
-    info!("Starting nvCOMP {} parallel decompression example", compressor.algorithm_name());
+    info!(
+        "Starting nvCOMP {} parallel decompression example",
+        compressor.algorithm_name()
+    );
 
     let (compressed_data, original_data) = create_test_data(&compressor)?;
     decompress_on_gpu(&compressor, &compressed_data, &original_data)?;
 
-    info!("{} example completed successfully", compressor.algorithm_name());
+    info!(
+        "{} example completed successfully",
+        compressor.algorithm_name()
+    );
     Ok(())
 }
 
@@ -108,8 +122,13 @@ fn decompress_on_gpu<C: Compressor>(
 
     // Create CUDA events for precise timing
     let start_event = device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
-    let decomp_start_event = device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
-    let decomp_end_event = device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
+    let decomp_events = vec![
+        device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?,
+        device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?,
+        device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?,
+        device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?,
+        device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?,
+    ];
     let end_event = device.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
 
     info!(
@@ -159,9 +178,6 @@ fn decompress_on_gpu<C: Compressor>(
     let gpu_decompressed_ptr_array: CudaSlice<CUdeviceptr> =
         stream.memcpy_stod(&gpu_decompressed_ptrs)?;
 
-    // Record decompression start event (after data copy)
-    decomp_start_event.record(&stream)?;
-
     // Synchronize to ensure all copies are complete before decompression
     stream.synchronize()?;
     let copy_time = start.elapsed();
@@ -175,7 +191,10 @@ fn decompress_on_gpu<C: Compressor>(
     let total_decompressed_size = NUM_CHUNKS * chunk_size_bytes;
     let overall_compression_ratio = total_decompressed_size as f32 / total_compressed_size as f32;
 
-    info!("nvCOMP {} batched decompression would be called here with:", compressor.algorithm_name());
+    info!(
+        "nvCOMP {} batched decompression would be called here with:",
+        compressor.algorithm_name()
+    );
     info!("  {} chunks of compressed data", NUM_CHUNKS);
     info!(
         "  Total compressed data: {} (pointers at {:?})",
@@ -192,36 +211,37 @@ fn decompress_on_gpu<C: Compressor>(
         overall_compression_ratio,
     );
 
-    // Call algorithm-specific decompression
-    compressor.decompress_on_gpu(
-        gpu_compressed_ptr_array.device_ptr(&stream).0,
-        gpu_compressed_sizes.device_ptr(&stream).0,
-        gpu_decompressed_buffer_sizes.device_ptr(&stream).0,
-        gpu_actual_decompressed_sizes.device_ptr(&stream).0,
-        gpu_decompressed_ptr_array.device_ptr(&stream).0,
-        gpu_statuses.device_ptr(&stream).0,
-        stream.cu_stream() as cudaStream_t,
-    )?;
+    // Record decompression start event (after data copy)
+    // Repeat a few of these on the stream
+    decomp_events[0].record(&stream)?;
+    for i in 1..decomp_events.len() {
+        // Call algorithm-specific decompression
+        compressor.decompress_on_gpu(
+            gpu_compressed_ptr_array.device_ptr(&stream).0,
+            gpu_compressed_sizes.device_ptr(&stream).0,
+            gpu_decompressed_buffer_sizes.device_ptr(&stream).0,
+            gpu_actual_decompressed_sizes.device_ptr(&stream).0,
+            gpu_decompressed_ptr_array.device_ptr(&stream).0,
+            gpu_statuses.device_ptr(&stream).0,
+            stream.cu_stream() as cudaStream_t,
+        )?;
+        decomp_events[i].record(&stream)?;
+    }
 
-    // Record decompression end event
-    decomp_end_event.record(&stream)?;
-
-    // Record total end event
     end_event.record(&stream)?;
-
-    // Wait for events to complete before measuring
-    decomp_end_event.synchronize()?;
-    end_event.synchronize()?;
-
-    // Ensure all GPU work is complete
     stream.synchronize()?;
 
     // Calculate GPU timings using CUDA events
     info!("Calculating GPU timings using CUDA events...");
 
-    // Get precise timing from CUDA events
+    // Get timing from CUDA events
     let total_gpu_time = start_event.elapsed_ms(&end_event)?;
-    let decomp_gpu_time = decomp_start_event.elapsed_ms(&decomp_end_event)?;
+    let decomp_gpu_time = {
+        (1..decomp_events.len())
+            .filter_map(|i| decomp_events[i - 1].elapsed_ms(&decomp_events[i]).ok())
+            .min_by(f32::total_cmp)
+            .unwrap()
+    };
     let copy_gpu_time = total_gpu_time - decomp_gpu_time;
 
     info!("Total GPU time: {:.4}ms", total_gpu_time);
@@ -237,7 +257,10 @@ fn decompress_on_gpu<C: Compressor>(
 
     let total_decompressed_size = NUM_CHUNKS * chunk_size_bytes;
 
-    info!("GPU {} decompression completed:", compressor.algorithm_name());
+    info!(
+        "GPU {} decompression completed:",
+        compressor.algorithm_name()
+    );
     info!("  Copy to GPU: {:.4}ms", copy_gpu_time);
     info!("  Decompression: {:.4}ms", decomp_gpu_time);
     info!("  Total GPU time: {:.4}ms", total_gpu_time);
@@ -318,7 +341,8 @@ impl Compressor for ZstdCompressor {
         Ok(zstd::encode_all(data, 3)?)
     }
 
-    fn decompress_on_gpu(&self, 
+    fn decompress_on_gpu(
+        &self,
         gpu_compressed_ptr_array: CUdeviceptr,
         gpu_compressed_sizes: CUdeviceptr,
         gpu_decompressed_buffer_sizes: CUdeviceptr,
@@ -371,7 +395,9 @@ impl Compressor for ZstdCompressor {
             );
 
             if status != NVCOMP_SUCCESS {
-                return Err(format!("nvCOMP Zstd decompression failed with status: {}", status).into());
+                return Err(
+                    format!("nvCOMP Zstd decompression failed with status: {}", status).into(),
+                );
             }
 
             info!("nvCOMP Zstd decompression completed successfully");
@@ -394,10 +420,15 @@ impl Lz4Compressor {
 
 impl Compressor for Lz4Compressor {
     fn compress_data(&self, data: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
-        Ok(lz4::block::compress(data, Some(lz4::block::CompressionMode::DEFAULT), false)?)
+        Ok(lz4::block::compress(
+            data,
+            Some(lz4::block::CompressionMode::DEFAULT),
+            false,
+        )?)
     }
 
-    fn decompress_on_gpu(&self, 
+    fn decompress_on_gpu(
+        &self,
         gpu_compressed_ptr_array: CUdeviceptr,
         gpu_compressed_sizes: CUdeviceptr,
         gpu_decompressed_buffer_sizes: CUdeviceptr,
@@ -450,7 +481,9 @@ impl Compressor for Lz4Compressor {
             );
 
             if status != NVCOMP_SUCCESS {
-                return Err(format!("nvCOMP LZ4 decompression failed with status: {}", status).into());
+                return Err(
+                    format!("nvCOMP LZ4 decompression failed with status: {}", status).into(),
+                );
             }
 
             info!("nvCOMP LZ4 decompression completed successfully");
