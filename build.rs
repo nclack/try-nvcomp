@@ -25,6 +25,8 @@ fn main() {
         .allowlist_type("cudaStream_t")
         .allowlist_function("nvcompBatchedZstdDecompressAsync")
         .allowlist_function("nvcompBatchedZstdDecompressGetTempSize")
+        .allowlist_function("nvcompBatchedLZ4DecompressAsync")
+        .allowlist_function("nvcompBatchedLZ4DecompressGetTempSize")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         // Silence naming convention warnings
         .derive_debug(false)

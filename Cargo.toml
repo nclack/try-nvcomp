@@ -3,9 +3,18 @@ name = "try-nvcomp"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "zstd_test"
+path = "src/zstd_test.rs"
+
+[[bin]]
+name = "lz4_test"
+path = "src/lz4_test.rs"
+
 [dependencies]
 cudarc = { version = "0.17", features = ["cuda-12060"] }
 zstd = "0.13"
+lz4 = "1.26"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 rand = "0.8"
