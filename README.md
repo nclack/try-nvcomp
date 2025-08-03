@@ -1,6 +1,6 @@
 # try-nvcomp
 
-GPU decompression benchmarks using NVIDIA nvCOMP library for Zstd and LZ4 compression algorithms.
+GPU compression and decompression benchmarks using NVIDIA nvCOMP library for Zstd and LZ4 compression algorithms.
 
 ## Prerequisites
 
@@ -16,43 +16,56 @@ cargo build --release
 
 ## Run
 
-The project includes two benchmarking binaries:
+### Unified Benchmark Tool
 
-### Zstd Decompression Test
+Run compression or decompression benchmarks:
+
 ```bash
-cargo run --release --bin zstd_test
+# Compression benchmarks
+cargo run --release --bin benchmark compress zstd
+cargo run --release --bin benchmark compress lz4
+
+# Decompression benchmarks  
+cargo run --release --bin benchmark decompress zstd
+cargo run --release --bin benchmark decompress lz4
+
+# Multiple runs for statistical analysis
+cargo run --release --bin benchmark compress zstd -r 5
 ```
 
-### LZ4 Decompression Test  
-```bash
-cargo run --release --bin lz4_test
-```
+**Usage:** `benchmark <compress|decompress> [zstd|lz4] [-r runs] [-v]`
 
 ## What it does
 
-Both tests:
-1. Generate 1000 chunks of 1MB test data (u16 arrays) with different patterns
-2. Compress the data on CPU using the respective algorithm (Zstd or LZ4)
-3. Pack compressed data, metadata, and headers into a single pinned memory buffer, aligning to 8-bytes
-4. Transfer the entire unified buffer to GPU memory in one operation
-5. Decompress all chunks in parallel on GPU using nvCOMP batched operations
-6. Verify decompressed data matches original
-7. Report GPU copy and decompression throughput in GB/s
+### Compression Benchmark:
+1. Generates 1000 chunks of 1MB test data (u16 arrays) with different patterns
+2. Transfers uncompressed data to GPU memory
+3. Compresses all chunks in parallel on GPU using nvCOMP batched operations
+4. Transfers compressed results back to host
+5. Validates results by decompressing on CPU and comparing with original
+6. Reports compression throughput and compression ratio
 
-The benchmarks measure both memory transfer and GPU decompression performance
-using CUDA events for precise timing. The unified buffer approach minimizes
-GPU memory transfers by consolidating all data into a single pinned memory
-allocation transferred via one memcpy operation.
+### Decompression Benchmark:
+1. Generates and compresses test data on CPU using the respective algorithm
+2. Packs compressed data, metadata, and headers into a single pinned memory buffer
+3. Transfers the entire unified buffer to GPU memory in one operation
+4. Decompresses all chunks in parallel on GPU using nvCOMP batched operations
+5. Verifies decompressed data matches original
+6. Reports GPU copy and decompression throughput
 
-Patterns:
-- Uniformly distributed random over 10 bits.
-- Constant value
+Both benchmarks use CUDA events for precise GPU-only timing measurements and
+implement minimum-time sampling across multiple iterations to measure peak
+performance capabilities.
+
+**Test Data Patterns:**
+- Uniformly distributed random over 10 bits
+- Constant value (42)
 - Linear ramp over 16 bits
 
 ## Benchmark Results
 
-Environment: Windows 11
-Hardware configuration:
+**Environment:** Windows 11  
+**Hardware Configuration:**
 - **GPU**: NVIDIA GeForce RTX 5080 (16GB VRAM)
 - **CPU**: AMD Ryzen 5 7600X 6-Core Processor (12 threads)
 - **RAM**: 64GB
@@ -60,19 +73,26 @@ Hardware configuration:
 - **CUDA**: 12.9
 - **nvCOMP**: v4.2
 
-### Unified Buffer Performance (3 runs each):
+### GPU Compression Performance (3 runs each):
+
+**GPU Compression:**
+- Zstd: **5.71 GB/s** (runs: 5.71, 5.71, 5.71 GB/s)
+- LZ4: **18.72 GB/s** (runs: 18.71, 18.72, 18.69 GB/s)
+
+### GPU Decompression Performance (3 runs each):
 
 **Copy to GPU (Pinned Memory):**
-- Zstd: **11.78 GB/s** (runs: 10.50, 11.71, 11.78 GB/s)
-- LZ4: **18.54 GB/s** (runs: 18.39, 18.54, 18.00 GB/s)
+- Zstd: **11.62 GB/s** (runs: 11.62, 11.41, 10.79 GB/s)
+- LZ4: **19.29 GB/s** (runs: 17.71, 19.29, 19.08 GB/s)
 
 **GPU Decompression:**
-- Zstd: **49.15 GB/s** (runs: 47.86, 45.52, 49.15 GB/s)
-- LZ4: **93.65 GB/s** (runs: 93.47, 93.39, 93.65 GB/s)
+- Zstd: **49.67 GB/s** (runs: 46.24, 49.67, 48.66 GB/s)
+- LZ4: **94.26 GB/s** (runs: 94.26, 94.08, 94.04 GB/s)
 
-_Note_: Running in WSL effects copies to the gpu by about 50%.
-        Decompression bandwidths are the same.
-        This could be differences in the cuda version (12.6 vs 12.9), drivers
-        (575.57 vs 576.57), but it's probably just the virtualization. It looks
-        a lot like 1 extra copy.
+**Notes:**
+- Compression throughput measures uncompressed data processing rate on GPU
+- Decompression results based on unified buffer approach (single memcpy operation)
+- All measurements use CUDA events for precise GPU-only timing
+- Results represent peak performance (minimum time across multiple runs)
+- Running in WSL reduces copy bandwidth by ~50% but maintains same decompression performance
 
