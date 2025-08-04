@@ -87,7 +87,15 @@ performance capabilities.
 - Zstd: **57.40 GB/s** (runs: 57.40, 57.35, 57.38 GB/s)
 - LZ4: **57.34 GB/s** (runs: 57.34, 57.12, 57.14 GB/s)
 
+** Output Compression Ratios:**
+- Zstd: **3.03x** (1048.6 MB → 345.8 MB)
+- LZ4: **1.49x** (1048.6 MB → 702.0 MB)
+
 ### GPU Decompression Performance (3 runs each):
+
+**Input Compression Ratios:**
+- Zstd: **3.45x** (304.1 MB → 1048.6 MB decompressed)
+- LZ4: **1.49x** (703.5 MB → 1048.6 MB decompressed)
 
 **Copy to GPU:**
 - Zstd: **37.09 GB/s** (runs: 37.09, 36.72, 37.09 GB/s)
