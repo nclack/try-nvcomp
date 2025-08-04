@@ -42,7 +42,7 @@ cargo run --release --bin benchmark compress zstd -r 5
 2. Transfers uncompressed data to GPU memory
 3. Compresses all chunks in parallel on GPU using nvCOMP batched operations
 4. Transfers compressed results back to host
-5. Validates results by decompressing on CPU and comparing with original
+5. Validates results by decompressing on CPU and comparing with the original
 6. Reports compression throughput and compression ratio
 
 ### Decompression Benchmark:
@@ -53,9 +53,8 @@ cargo run --release --bin benchmark compress zstd -r 5
 5. Verifies decompressed data matches original
 6. Reports GPU copy and decompression throughput
 
-Both benchmarks use CUDA events for precise GPU-only timing measurements and
-implement minimum-time sampling across multiple iterations to measure peak
-performance capabilities.
+Both benchmarks use CUDA events for timing measurements and use minimum-time 
+sampling across multiple iterations to measure the peak performance.
 
 **Test Data Patterns:**
 - Uniformly distributed random over 10 bits
@@ -110,9 +109,9 @@ performance capabilities.
 - LZ4: **57.36 GB/s** (runs: 53.76, 57.13, 57.36 GB/s)
 
 **Notes:**
-- Compression throughput measures uncompressed data processing rate on GPU
-- Decompression results based on unified buffer approach (single memcpy operation)
-- All measurements use CUDA events for precise GPU-only timing
+- Compression throughput measures the uncompressed data processing rate on the GPU
+- Using pinned, single transfers for DtoH or HtoD is important for copy bandwidth.
+- All measurements use CUDA events for timing
 - Results represent peak performance (minimum time across multiple runs)
-- Running in WSL reduces copy bandwidth by ~50% but maintains same decompression performance
+- Running in WSL reduces copy bandwidth by ~50% but maintains the same decompression performance
 
