@@ -30,9 +30,6 @@ pub struct CompressedData {
 pub fn create_test_data<C: Compressor>(
     compressor: &C,
 ) -> Result<(CompressedData, Vec<Vec<u8>>), Box<dyn Error>> {
-    let device = CudaContext::new(0)?;
-    let _stream = device.default_stream();
-
     // Generate 3 different patterns
     let patterns = vec![
         generate_sample_data(),
@@ -78,6 +75,7 @@ pub fn create_test_data<C: Compressor>(
     let _compressed_data_offset = 0;
 
     // Allocate single unified pinned buffer
+    let device = CudaContext::new(0)?;
     let mut pinned_buffer: PinnedHostSlice<u8> = unsafe { device.alloc_pinned(total_buffer_size)? };
 
     // Second pass: compress directly into pinned memory

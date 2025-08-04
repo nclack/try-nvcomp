@@ -75,19 +75,31 @@ performance capabilities.
 
 ### GPU Compression Performance (3 runs each):
 
+**Copy to GPU:**
+- Zstd: **37.22 GB/s** (runs: 30.47, 37.22, 36.82 GB/s)
+- LZ4: **37.63 GB/s** (runs: 37.55, 37.63, 36.59 GB/s)
+
 **GPU Compression:**
-- Zstd: **5.71 GB/s** (runs: 5.71, 5.71, 5.71 GB/s)
-- LZ4: **18.72 GB/s** (runs: 18.71, 18.72, 18.69 GB/s)
+- Zstd: **5.70 GB/s** (runs: 5.60, 5.70, 5.54 GB/s)
+- LZ4: **18.30 GB/s** (runs: 18.02, 18.29, 18.30 GB/s)
+
+**Copy from GPU:**
+- Zstd: **57.40 GB/s** (runs: 57.40, 57.35, 57.38 GB/s)
+- LZ4: **57.34 GB/s** (runs: 57.34, 57.12, 57.14 GB/s)
 
 ### GPU Decompression Performance (3 runs each):
 
-**Copy to GPU (Pinned Memory):**
-- Zstd: **11.62 GB/s** (runs: 11.62, 11.41, 10.79 GB/s)
-- LZ4: **19.29 GB/s** (runs: 17.71, 19.29, 19.08 GB/s)
+**Copy to GPU:**
+- Zstd: **37.09 GB/s** (runs: 37.09, 36.72, 37.09 GB/s)
+- LZ4: **37.28 GB/s** (runs: 36.97, 35.36, 37.28 GB/s)
 
 **GPU Decompression:**
-- Zstd: **49.67 GB/s** (runs: 46.24, 49.67, 48.66 GB/s)
-- LZ4: **94.26 GB/s** (runs: 94.26, 94.08, 94.04 GB/s)
+- Zstd: **51.24 GB/s** (runs: 51.24, 50.39, 50.57 GB/s)
+- LZ4: **93.43 GB/s** (runs: 93.13, 93.43, 93.41 GB/s)
+
+**Copy from GPU:**
+- Zstd: **57.39 GB/s** (runs: 56.79, 57.39, 57.38 GB/s)
+- LZ4: **57.36 GB/s** (runs: 53.76, 57.13, 57.36 GB/s)
 
 **Notes:**
 - Compression throughput measures uncompressed data processing rate on GPU
