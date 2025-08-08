@@ -86,7 +86,7 @@ sampling across multiple iterations to measure the peak performance.
 - Zstd: **57.40 GB/s** (runs: 57.40, 57.35, 57.38 GB/s)
 - LZ4: **57.34 GB/s** (runs: 57.34, 57.12, 57.14 GB/s)
 
-** Output Compression Ratios:**
+**Output Compression Ratios:**
 - Zstd: **3.03x** (1048.6 MB → 345.8 MB)
 - LZ4: **1.49x** (1048.6 MB → 702.0 MB)
 
